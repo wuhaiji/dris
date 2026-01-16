@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（例如 v0.1.0）"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+    steps:
+      - name: 检出代码（含 tags）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: 安装 Rust（MSRV）
+        uses: dtolnay/rust-toolchain@1.85.0
+        with:
+          components: rustfmt, clippy
+
+      - name: 缓存 Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: 格式检查
+        run: cargo fmt --all --check
+
+      - name: 测试
+        run: cargo test --workspace
+
+      - name: 生成 Release Notes
+        run: |
+          cat RELEASE.md > release-notes.md
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          body_path: release-notes.md
+
+      - name: 发布 crates（需要 CARGO_REGISTRY_TOKEN）
+        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+
+          cargo publish -p dris-macros
+
+          published=false
+          for i in 1 2 3 4 5; do
+            if cargo publish -p dris-rt; then
+              published=true
+              break
+            fi
+            echo "dris-rt 发布失败，可能是 index 尚未同步（等待 30s 后重试，第 ${i}/5 次）"
+            sleep 30
+          done
+          if [ "${published}" != "true" ]; then
+            echo "dris-rt 发布重试仍失败，终止发布"
+            exit 1
+          fi
+
+          published=false
+          for i in 1 2 3 4 5; do
+            if cargo publish -p dris-build; then
+              published=true
+              break
+            fi
+            echo "dris-build 发布失败，可能是 index 尚未同步（等待 30s 后重试，第 ${i}/5 次）"
+            sleep 30
+          done
+          if [ "${published}" != "true" ]; then
+            echo "dris-build 发布重试仍失败，终止发布"
+            exit 1
+          fi
