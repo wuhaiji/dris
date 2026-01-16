@@ -75,5 +75,5 @@ fn main() {
 
 ## 约束与建议
 
-- `dris-build` 不做 `cfg` 条件裁剪（会解析 `src/**/*.rs`）；不要用 `cfg` 写“互斥的同名组件定义”，否则可能触发“组件类型重复”。
+- `dris-build` 不做 `cfg` 条件裁剪（会解析 `src/**/*.rs`），因此当前版本**不支持**在 `cfg`/`cfg_attr` 作用域里声明组件/构造函数（包括 `#[cfg_attr(..., component/constructor)]`）。建议把 `cfg` 放在实现细节里，不要切换组件类型/构造函数本身。
 - `Arc/Rc<dyn Trait>` 注入：当且仅当某个 trait 只有一个实现时可直接注入；多个实现请用 `dris_rt::All<Arc/Rc<dyn Trait>>`（或 `dris_rt::All<(dris_rt::Type, Arc/Rc<dyn Trait>)>`）。

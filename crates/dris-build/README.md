@@ -38,4 +38,4 @@ let container = dris_gen::Container::build();
 
 - 扫描当前 crate 的 `#[component]`/`#[constructor]`。
 - 会尝试递归扫描依赖（path 依赖与 registry 依赖），以支持跨 crate 的组件组合。
-- 不做 `cfg` 条件裁剪（会解析 `src/**/*.rs`）；不要用 `cfg` 写“互斥的同名组件定义”，否则可能触发“组件类型重复”。
+- 不做 `cfg` 条件裁剪（会解析 `src/**/*.rs`），因此当前版本**不支持**在 `cfg`/`cfg_attr` 作用域里声明组件/构造函数（包括 `#[cfg_attr(..., component/constructor)]`）。建议把 `cfg` 放在实现细节里，不要切换组件类型/构造函数本身。

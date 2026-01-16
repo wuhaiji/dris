@@ -49,18 +49,30 @@ pub(crate) fn scan_crate(
             crate_ident: crate_ident.to_string(),
             module_path,
         };
-        scan_items(&ast.items, &ctx, &mut out)?;
+        scan_items(&ast.items, &ctx, &mut out, false)?;
     }
 
     Ok((out, touched_files))
 }
 
-fn scan_items(items: &[Item], ctx: &ScanCtx, out: &mut ScanOut) -> Result<()> {
+fn scan_items(items: &[Item], ctx: &ScanCtx, out: &mut ScanOut, cfg_guarded: bool) -> Result<()> {
     for item in items {
         match item {
             Item::Struct(item_struct) => {
+                if cfg_attr_mentions_marker(&item_struct.attrs, "component") {
+                    return Err(anyhow!(
+                        "不支持用 #[cfg_attr] 条件启用 #[component]：dris-build 不做 cfg 条件裁剪，也无法在 build.rs 阶段判断该组件是否存在；请把组件定义写成普通源码，并把 cfg 放到组件内部实现细节里：{}",
+                        item_struct.ident
+                    ));
+                }
                 if !has_attr(&item_struct.attrs, "component") {
                     continue;
+                }
+                if cfg_guarded || has_cfg_like_attr(&item_struct.attrs) {
+                    return Err(anyhow!(
+                        "不支持在 cfg/cfg_attr 作用域里声明组件：{}（dris-build 扫描不理解 cfg，可能生成不存在的代码）。建议：把 cfg 放到组件内部实现细节里，不要切换组件类型/构造函数本身。",
+                        item_struct.ident
+                    ));
                 }
                 let scope_override = parse_scope_override(&item_struct.attrs, "component")?;
                 let type_key = type_key_from_qualified_ident(
@@ -107,6 +119,13 @@ fn scan_items(items: &[Item], ctx: &ScanCtx, out: &mut ScanOut) -> Result<()> {
             }
             Item::Impl(item_impl) => {
                 let self_ty = type_ref_from_type(&item_impl.self_ty, ctx, true)?;
+                let impl_cfg_guarded = cfg_guarded || has_cfg_like_attr(&item_impl.attrs);
+                if impl_cfg_guarded && cfg_attr_mentions_marker(&item_impl.attrs, "constructor") {
+                    return Err(anyhow!(
+                        "不支持用 #[cfg_attr] 条件启用 #[constructor]：{}",
+                        self_ty.key
+                    ));
+                }
 
                 if let Some((_, trait_path, _)) = &item_impl.trait_ {
                     let trait_key = trait_key_from_path(trait_path, ctx)?;
@@ -119,9 +138,23 @@ fn scan_items(items: &[Item], ctx: &ScanCtx, out: &mut ScanOut) -> Result<()> {
                         let syn::ImplItem::Fn(impl_fn) = impl_item else {
                             continue;
                         };
+                        if cfg_attr_mentions_marker(&impl_fn.attrs, "constructor") {
+                            return Err(anyhow!(
+                                "不支持用 #[cfg_attr] 条件启用 #[constructor]：{}::{}",
+                                self_ty.key,
+                                impl_fn.sig.ident
+                            ));
+                        }
                         let is_ctor = has_attr(&impl_fn.attrs, "constructor");
                         if !is_ctor {
                             continue;
+                        }
+                        if impl_cfg_guarded || has_cfg_like_attr(&impl_fn.attrs) {
+                            return Err(anyhow!(
+                                "不支持在 cfg/cfg_attr 作用域里声明构造函数：{}::{}（dris-build 扫描不理解 cfg，可能生成不存在的代码）。建议：把 cfg 放到构造函数内部实现细节里，不要切换构造函数本身。",
+                                self_ty.key,
+                                impl_fn.sig.ident
+                            ));
                         }
                         out.injects.push(parse_inject_ctor(impl_fn, &self_ty, ctx)?);
                     }
@@ -141,7 +174,8 @@ fn scan_items(items: &[Item], ctx: &ScanCtx, out: &mut ScanOut) -> Result<()> {
                 };
                 let mut next = ctx.clone();
                 next.module_path.push(item_mod.ident.to_string());
-                scan_items(inline_items, &next, out)?;
+                let next_cfg_guarded = cfg_guarded || has_cfg_like_attr(&item_mod.attrs);
+                scan_items(inline_items, &next, out, next_cfg_guarded)?;
             }
             _ => {}
         }
@@ -234,6 +268,23 @@ fn has_attr(attrs: &[syn::Attribute], name: &str) -> bool {
     attrs.iter().any(|attr| {
         let last = attr.path().segments.last().map(|s| s.ident.to_string());
         matches!(last.as_deref(), Some(n) if n == name)
+    })
+}
+
+fn has_cfg_like_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let last = attr.path().segments.last().map(|s| s.ident.to_string());
+        matches!(last.as_deref(), Some("cfg") | Some("cfg_attr"))
+    })
+}
+
+fn cfg_attr_mentions_marker(attrs: &[syn::Attribute], marker: &str) -> bool {
+    attrs.iter().any(|attr| {
+        let last = attr.path().segments.last().map(|s| s.ident.to_string());
+        if last.as_deref() != Some("cfg_attr") {
+            return false;
+        }
+        attr.to_token_stream().to_string().contains(marker)
     })
 }
 
