@@ -76,5 +76,4 @@ fn main() {
 
 ## 约束与建议
 
-- 已移除函数 provider（`#[bean]` / `#[component] fn`）。第三方类型/值请用 newtype/struct 包装后再 `#[component]` + `#[constructor]`，这样后续加钩子/资源管理更可控。
 - `Arc/Rc<dyn Trait>` 注入：当且仅当某个 trait 只有一个实现时可直接注入；多个实现请用 `dris_rt::All<Arc/Rc<dyn Trait>>`（或 `dris_rt::All<(dris_rt::Type, Arc/Rc<dyn Trait>)>`）。
