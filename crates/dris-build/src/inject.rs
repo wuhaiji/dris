@@ -218,7 +218,9 @@ pub(crate) fn parse_inject_param(param_ty: &Type, ctx: &ScanCtx) -> Result<Injec
             IterTraitKind::Iterator => "Iterator",
             IterTraitKind::IntoIterator => "IntoIterator",
         };
-        return Err(anyhow!("多组件注入请使用 dris_rt::All，不要使用 impl {kind}"));
+        return Err(anyhow!(
+            "多组件注入请使用 dris_rt::All，不要使用 impl {kind}"
+        ));
     }
 
     if matches!(param_ty, Type::Path(_)) {
