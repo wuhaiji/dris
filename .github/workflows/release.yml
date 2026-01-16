@@ -28,7 +28,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: 安装 Rust（MSRV）
-        uses: dtolnay/rust-toolchain@1.85.0
+        uses: dtolnay/rust-toolchain@1.92.0
         with:
           components: rustfmt, clippy
 
