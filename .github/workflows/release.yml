@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
     steps:
       - name: 检出代码（含 tags）
         uses: actions/checkout@v4
@@ -41,18 +41,14 @@ jobs:
       - name: 测试
         run: cargo test --workspace
 
-      - name: 生成 Release Notes
-        run: |
-          cat RELEASE.md > release-notes.md
-
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          body_path: release-notes.md
+          generate_release_notes: true
 
       - name: 发布 crates（需要 CARGO_REGISTRY_TOKEN）
-        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
         run: |
           set -euo pipefail
 
