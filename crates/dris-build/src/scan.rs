@@ -177,11 +177,16 @@ fn parse_inject_ctor(
         }
     }
 
-    let (return_is_ref, return_kind, return_inner) =
-        normalize_inject_return(&impl_fn.sig.output, ctx)?;
-    if !return_matches_self(&return_inner, self_ty, ctx)? {
+    let return_ty = normalize_inject_return(&impl_fn.sig.output, ctx)?;
+    if extract_shared_inner_type(&return_ty).is_some() {
         return Err(anyhow!(
-            "#[constructor] 返回类型必须是 Self 或 Arc<Self>/Rc<Self>：{}",
+            "不支持 #[constructor] 返回 Arc<Self>/Rc<Self>（请让构造函数返回 Self，并用 #[component(singleton)] 显式声明单例）：{}",
+            impl_fn.sig.ident
+        ));
+    }
+    if !return_matches_self(&return_ty, self_ty, ctx)? {
+        return Err(anyhow!(
+            "#[constructor] 返回类型必须是 Self（或当前组件类型）：{}",
             impl_fn.sig.ident
         ));
     }
@@ -197,26 +202,15 @@ fn parse_inject_ctor(
     Ok(InjectCtorRaw {
         self_ty: self_ty.clone(),
         call_path: format!("{}::{}", self_ty.key, impl_fn.sig.ident),
-        return_is_ref,
-        return_kind,
         params,
     })
 }
 
-fn normalize_inject_return(
-    output: &ReturnType,
-    ctx: &ScanCtx,
-) -> Result<(bool, Option<crate::model::SharedKind>, Type)> {
+fn normalize_inject_return(output: &ReturnType, ctx: &ScanCtx) -> Result<Type> {
     let ReturnType::Type(_, ty) = output else {
         return Err(anyhow!("#[constructor] 必须显式声明返回类型"));
     };
-
-    let ty = rewrite_type_crate_prefix(ty, &ctx.crate_ident)?;
-    if let Some((kind, inner)) = extract_shared_inner_type(&ty) {
-        let inner = rewrite_type_crate_prefix(inner, &ctx.crate_ident)?;
-        return Ok((true, Some(kind), inner));
-    }
-    Ok((false, None, ty))
+    rewrite_type_crate_prefix(ty, &ctx.crate_ident)
 }
 
 fn return_matches_self(return_ty: &Type, self_ty: &TypeRef, ctx: &ScanCtx) -> Result<bool> {

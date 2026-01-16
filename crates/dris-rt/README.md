@@ -72,7 +72,6 @@ fn main() {
 常用方式：
 
 - `#[component(singleton)]` 强制单例。
-- `#[constructor]` 返回 `Arc<Self>`/`Rc<Self>` 也会被视为单例（并参与上面的持有方式推断）。
 
 ## 约束与建议
 

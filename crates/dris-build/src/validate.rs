@@ -21,22 +21,6 @@ pub(crate) fn validate_component_scopes(
     }
 
     for (ty, c) in components {
-        let scope = scope_by_type
-            .get(ty)
-            .copied()
-            .unwrap_or(ComponentScope::Prototype);
-
-        if scope == ComponentScope::Prototype {
-            if let Some(inject) = c.inject.as_ref() {
-                if inject.return_is_ref {
-                    return Err(anyhow!(
-                        "组件 {} 声明为 Prototype，但 #[constructor] 返回了 Arc<_>/Rc<_>：请将返回类型改为 Self，或把组件声明为 Singleton（例如 #[component(singleton)]）",
-                        ty
-                    ));
-                }
-            }
-        }
-
         let mut params: Vec<&InjectParam> = Vec::new();
         if let Some(inject) = c.inject.as_ref() {
             params.extend(inject.params.iter());
@@ -55,13 +39,12 @@ pub(crate) fn validate_component_scopes(
                     })?;
                     if dep_scope != ComponentScope::Singleton {
                         return Err(anyhow!(
-                            "组件 {} 以 {} 注入 {}，但 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]），或让其 #[constructor] 返回 {}<_>",
+                            "组件 {} 以 {} 注入 {}，但 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
                             ty,
                             shared_kind_name(*kind),
                             dep_type,
                             dep_type,
                             dep_type,
-                            shared_kind_name(*kind),
                         ));
                     }
                 }
@@ -96,14 +79,13 @@ pub(crate) fn validate_component_scopes(
                         .ok_or_else(|| anyhow!("组件 {} 依赖 {}，但未找到对应组件", ty, impl_ty))?;
                     if dep_scope != ComponentScope::Singleton {
                         return Err(anyhow!(
-                            "组件 {} 以 {}<dyn Trait> 注入 {} 的实现 {}，但 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]），或让其 #[constructor] 返回 {}<_>",
+                            "组件 {} 以 {}<dyn Trait> 注入 {} 的实现 {}，但 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
                             ty,
                             shared_kind_name(*kind),
                             trait_primary,
                             impl_ty,
                             impl_ty,
                             impl_ty,
-                            shared_kind_name(*kind),
                         ));
                     }
                 }
@@ -141,13 +123,12 @@ pub(crate) fn validate_component_scopes(
                         };
                         if dep_scope != ComponentScope::Singleton {
                             return Err(anyhow!(
-                                "组件 {} 需要 {} 的实现以 {}<dyn Trait> 注入，但实现 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]），或让其 #[constructor] 返回 {}<_>",
+                                "组件 {} 需要 {} 的实现以 {}<dyn Trait> 注入，但实现 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
                                 ty,
                                 trait_primary,
                                 shared_kind_name(*kind),
                                 impl_ty,
                                 impl_ty,
-                                shared_kind_name(*kind),
                             ));
                         }
                     }

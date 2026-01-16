@@ -501,19 +501,7 @@ fn build_component_expr(
         };
 
         return Ok(match scope {
-            ComponentScope::Singleton => {
-                if inject.return_is_ref {
-                    if holder.is_none() {
-                        return Err(anyhow!(
-                            "组件 {} 的构造函数返回 Arc/Rc<Self>，但未推断出对应的持有方式",
-                            ty
-                        ));
-                    }
-                    expr
-                } else {
-                    holder_new(holder, &expr)
-                }
-            }
+            ComponentScope::Singleton => holder_new(holder, &expr),
             ComponentScope::Prototype => expr,
         });
     }

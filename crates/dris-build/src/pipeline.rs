@@ -58,16 +58,6 @@ fn infer_holder_kind_by_type(
         by_type.insert(ty.clone(), None);
     }
 
-    for (ty, c) in components {
-        let Some(inject) = c.inject.as_ref() else {
-            continue;
-        };
-        let Some(kind) = inject.return_kind else {
-            continue;
-        };
-        require_shared_kind(&mut by_type, ty, kind)?;
-    }
-
     for c in components.values() {
         let params: Vec<&InjectParam> = if let Some(inject) = c.inject.as_ref() {
             inject.params.iter().collect()
@@ -290,8 +280,6 @@ pub(crate) fn generate() -> Result<()> {
 
         component.inject = Some(InjectCtor {
             call_path: raw.call_path,
-            return_is_ref: raw.return_is_ref,
-            return_kind: raw.return_kind,
             params,
         });
     }

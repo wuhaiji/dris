@@ -89,10 +89,7 @@ fn main() {
 
 默认是 **Prototype**（每次获取都会新建）。
 
-单例（Singleton）有两种方式：
-
-- 显式指定：`#[component(singleton)]` 或 `#[component(scope = "singleton")]`
-- 返回共享指针：`#[constructor]` 返回 `Arc<Self>` / `Rc<Self>` 会被视为单例
+单例（Singleton）需要显式指定：`#[component(singleton)]` 或 `#[component(scope = "singleton")]`
 
 ### 支持的注入形态（四种基本形态）
 

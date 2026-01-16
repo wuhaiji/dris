@@ -49,8 +49,6 @@ pub(crate) enum InjectParamRaw {
 pub(crate) struct InjectCtorRaw {
     pub(crate) self_ty: TypeRef,
     pub(crate) call_path: String,
-    pub(crate) return_is_ref: bool,
-    pub(crate) return_kind: Option<SharedKind>,
     pub(crate) params: Vec<InjectParamRaw>,
 }
 
@@ -95,8 +93,6 @@ pub(crate) struct ScanOut {
 #[derive(Debug, Clone)]
 pub(crate) struct InjectCtor {
     pub(crate) call_path: String,
-    pub(crate) return_is_ref: bool,
-    pub(crate) return_kind: Option<SharedKind>,
     pub(crate) params: Vec<InjectParam>,
 }
 
@@ -158,13 +154,6 @@ impl Component {
         if let Some(scope) = self.scope_override {
             return scope;
         }
-        let Some(inject) = self.inject.as_ref() else {
-            return ComponentScope::Prototype;
-        };
-        if inject.return_is_ref {
-            ComponentScope::Singleton
-        } else {
-            ComponentScope::Prototype
-        }
+        ComponentScope::Prototype
     }
 }
