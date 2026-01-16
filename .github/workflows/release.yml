@@ -48,15 +48,34 @@ jobs:
           generate_release_notes: true
 
       - name: 发布 crates（需要 CARGO_REGISTRY_TOKEN）
-        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
+        # 仅对“稳定版 tag”（例如 v0.1.0）执行自动发布，避免测试/预发布 tag 误触发发布。
+        if: ${{ env.CARGO_REGISTRY_TOKEN != '' && startsWith(env.RELEASE_TAG, 'v') && !contains(env.RELEASE_TAG, '-') }}
         run: |
           set -euo pipefail
 
-          cargo publish -p dris-macros
+          publish_if_needed() {
+            local pkg="$1"
+            local output
+
+            if output="$(cargo publish -p "${pkg}" 2>&1)"; then
+              echo "${output}"
+              return 0
+            fi
+
+            echo "${output}"
+            if echo "${output}" | grep -q "already exists on crates.io index"; then
+              echo "${pkg} 已存在于 crates.io，跳过发布"
+              return 0
+            fi
+
+            return 1
+          }
+
+          publish_if_needed dris-macros
 
           published=false
           for i in 1 2 3 4 5; do
-            if cargo publish -p dris-rt; then
+            if publish_if_needed dris-rt; then
               published=true
               break
             fi
@@ -70,7 +89,7 @@ jobs:
 
           published=false
           for i in 1 2 3 4 5; do
-            if cargo publish -p dris-build; then
+            if publish_if_needed dris-build; then
               published=true
               break
             fi
