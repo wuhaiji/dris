@@ -38,3 +38,4 @@ let container = dris_gen::Container::build();
 
 - 扫描当前 crate 的 `#[component]`/`#[constructor]`。
 - 会尝试递归扫描依赖（path 依赖与 registry 依赖），以支持跨 crate 的组件组合。
+- 不做 `cfg` 条件裁剪（会解析 `src/**/*.rs`）；不要用 `cfg` 写“互斥的同名组件定义”，否则可能触发“组件类型重复”。
