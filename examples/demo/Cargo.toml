@@ -1,0 +1,13 @@
+[package]
+name = "demo"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+publish = false
+
+[dependencies]
+dris-rt = { path = "../../crates/dris-rt" }
+third-party = { path = "../third-party" }
+
+[build-dependencies]
+dris-build = { path = "../../crates/dris-build" }

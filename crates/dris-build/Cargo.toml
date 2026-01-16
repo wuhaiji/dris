@@ -1,0 +1,16 @@
+[package]
+name = "dris-build"
+version = "0.1.0"
+edition = "2024"
+description = "dris 的 build.rs 侧代码生成器（扫描 #[component]/#[constructor] 并生成容器代码）"
+documentation = "https://docs.rs/dris-build"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["di", "dependency-injection", "codegen", "build"]
+categories = ["development-tools::build-utils"]
+
+[dependencies]
+anyhow = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }

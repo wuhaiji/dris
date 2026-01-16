@@ -1,0 +1,14 @@
+[package]
+name = "dris-rt"
+version = "0.1.0"
+edition = "2024"
+description = "一个轻量的 Rust 编译期依赖注入（DI）代码生成器运行时支持库"
+documentation = "https://docs.rs/dris-rt"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["di", "dependency-injection"]
+categories = ["development-tools"]
+
+[dependencies]
+dris-macros = { version = "0.1.0", path = "../dris-macros" }

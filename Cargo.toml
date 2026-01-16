@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/dris-rt",
+    "crates/dris-build",
+    "crates/dris-macros",
+    "examples/axum-users",
+    "examples/demo",
+    "examples/third-party",
+]
