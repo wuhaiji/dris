@@ -157,3 +157,26 @@ impl Component {
         ComponentScope::Prototype
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn component_scope_覆盖默认与显式覆盖() {
+        let base = Component {
+            crate_ident: "c".to_string(),
+            type_key: "crate::Foo".to_string(),
+            struct_name: "Foo".to_string(),
+            inject: None,
+            fields: ComponentFieldsRaw::Unit,
+            auto_fields: None,
+            scope_override: Some(ComponentScope::Singleton),
+        };
+        assert!(base.scope() == ComponentScope::Singleton);
+
+        let mut c2 = base.clone();
+        c2.scope_override = None;
+        assert!(c2.scope() == ComponentScope::Prototype);
+    }
+}

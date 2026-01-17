@@ -388,3 +388,359 @@ pub(crate) fn manifest_quick_mentions_dris(manifest_path: &Path) -> Result<bool>
     };
     Ok(content.contains("dris"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env_var(key: &str, value: &str) -> impl Drop {
+        struct Guard {
+            key: String,
+            old: Option<String>,
+        }
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                if let Some(v) = self.old.as_ref() {
+                    unsafe {
+                        std::env::set_var(&self.key, v);
+                    }
+                } else {
+                    unsafe {
+                        std::env::remove_var(&self.key);
+                    }
+                }
+            }
+        }
+
+        let old = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Guard {
+            key: key.to_string(),
+            old,
+        }
+    }
+
+    fn restore_env_var(key: &str, old: Option<String>) {
+        match old {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    #[test]
+    fn toml_parse_helpers_覆盖常见分支() {
+        assert_eq!(
+            parse_toml_section("[dependencies]").as_deref(),
+            Some("dependencies")
+        );
+        assert!(parse_toml_section("[dependencies").is_none());
+        assert!(parse_toml_section("dependencies").is_none());
+
+        assert_eq!(parse_toml_kv("a = 1").unwrap(), ("a", "1"));
+        assert!(parse_toml_kv("nope").is_none());
+
+        assert_eq!(parse_toml_string("\"a\""), Some("a"));
+        assert_eq!(parse_toml_string("'a'"), Some("a"));
+        assert!(parse_toml_string("a").is_none());
+
+        assert_eq!(
+            parse_inline_table_string("{ path = \"../x\" }", "path"),
+            Some("../x")
+        );
+        assert_eq!(
+            parse_inline_table_string("{ bad, path = \"../x\" }", "path"),
+            Some("../x")
+        );
+        assert!(parse_inline_table_string("not_table", "path").is_none());
+        assert!(parse_inline_table_string("{ path = \"../x\" ", "path").is_none());
+        assert!(parse_inline_table_string("{ x = \"1\" }", "path").is_none());
+        assert!(parse_inline_table_string("{ path = ../x }", "path").is_none());
+    }
+
+    #[test]
+    fn direct_dependencies_覆盖inline与table两种写法() {
+        let tmp = TempDir::new().unwrap();
+        let manifest = tmp.path().join("Cargo.toml");
+        std::fs::write(
+            &manifest,
+            r#"
+[package]
+name = "t"
+version = "0.1.0"
+
+[dependencies]
+foo = "1"
+broken
+bar = { path = "../bar" }
+baz = { package = "baz-real" }
+
+[dependencies.qux]
+broken
+path = 123
+package = 123
+optional = true
+path = "../qux"
+package = "qux-real"
+"#,
+        )
+        .unwrap();
+
+        let deps = direct_dependencies(&manifest).unwrap();
+        let mut by_key = BTreeMap::<String, DepSpec>::new();
+        for d in deps {
+            by_key.insert(d.key.clone(), d);
+        }
+
+        assert!(by_key.contains_key("foo"));
+        assert_eq!(by_key["baz"].package.as_deref(), Some("baz-real"));
+        assert!(by_key["bar"].path.as_ref().unwrap().ends_with("../bar"));
+        assert_eq!(by_key["qux"].package.as_deref(), Some("qux-real"));
+        assert!(by_key["qux"].path.as_ref().unwrap().ends_with("../qux"));
+    }
+
+    #[test]
+    fn find_lockfile_会向上查找() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        let b = a.join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(tmp.path().join("Cargo.lock"), "x").unwrap();
+        assert_eq!(find_lockfile(&b).unwrap(), tmp.path().join("Cargo.lock"));
+    }
+
+    #[test]
+    fn extract_quoted_strings_支持转义() {
+        let out = extract_quoted_strings(r#"["a\\\"b", "c"]"#);
+        assert_eq!(out, vec![r#"a\"b"#.to_string(), "c".to_string()]);
+
+        let out = extract_quoted_strings("\"unterminated");
+        assert_eq!(out, vec!["unterminated".to_string()]);
+
+        let out = extract_quoted_strings("\"foo\\");
+        assert_eq!(out, vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn parse_lockfile_能解析多package与依赖列表() {
+        let tmp = TempDir::new().unwrap();
+        let lock = tmp.path().join("Cargo.lock");
+        std::fs::write(
+            &lock,
+            r#"
+[[package]]
+name = "root"
+version = "0.1.0"
+dependencies = [
+ "dep1 1.2.3 (registry+https://example)",
+ "dep2",
+]
+
+[[package]]
+name = "dep1"
+version = "1.2.3"
+source = "registry+https://example"
+"#,
+        )
+        .unwrap();
+
+        let pkgs = parse_lockfile(&lock).unwrap();
+        assert_eq!(pkgs.len(), 2);
+        assert_eq!(pkgs[0].name, "root");
+        assert_eq!(pkgs[0].dependencies.len(), 2);
+        assert_eq!(pkgs[1].source.as_deref(), Some("registry+https://example"));
+    }
+
+    #[test]
+    fn parse_lockfile_覆盖inline_dependencies与异常key() {
+        let tmp = TempDir::new().unwrap();
+        let lock = tmp.path().join("Cargo.lock");
+        std::fs::write(
+            &lock,
+            r#"
+[[package]]
+namex = "ignored"
+name
+name = "root"
+versionx = "ignored"
+version
+version = "0.1.0"
+sourcex = "ignored"
+source
+source = "registry+https://example"
+dependencies = ["dep1 1.2.3 (registry+https://example)", "dep2"]
+"#,
+        )
+        .unwrap();
+
+        let pkgs = parse_lockfile(&lock).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].name, "root");
+        assert_eq!(pkgs[0].dependencies.len(), 2);
+    }
+
+    #[test]
+    fn parse_lockfile_覆盖未加引号与dependencies缺少括号_以及空文件() {
+        let tmp = TempDir::new().unwrap();
+        let lock = tmp.path().join("Cargo.lock");
+        std::fs::write(
+            &lock,
+            r#"
+[[package]]
+name = root
+version = 0.1.0
+source = registry+https://example
+dependencies = dep1
+"#,
+        )
+        .unwrap();
+
+        let pkgs = parse_lockfile(&lock).unwrap();
+        assert_eq!(pkgs.len(), 1);
+        assert!(pkgs[0].name.is_empty());
+        assert!(pkgs[0].version.is_empty());
+        assert!(pkgs[0].source.is_none());
+        assert!(pkgs[0].dependencies.is_empty());
+
+        let empty_lock = tmp.path().join("Empty.lock");
+        std::fs::write(&empty_lock, "").unwrap();
+        let pkgs = parse_lockfile(&empty_lock).unwrap();
+        assert!(pkgs.is_empty());
+    }
+
+    #[test]
+    fn lock_reachable_packages_覆盖root缺失与按依赖遍历() {
+        let pkgs = vec![
+            LockPackage {
+                name: "root".to_string(),
+                version: "0.1.0".to_string(),
+                source: None,
+                dependencies: vec![
+                    "".to_string(),
+                    "dep1 1.0.0 (registry+xxx)".to_string(),
+                    "dep2".to_string(),
+                ],
+            },
+            LockPackage {
+                name: "dep1".to_string(),
+                version: "1.0.0".to_string(),
+                source: None,
+                dependencies: vec![],
+            },
+            LockPackage {
+                name: "dep2".to_string(),
+                version: "2.0.0".to_string(),
+                source: None,
+                dependencies: vec!["dep1".to_string()],
+            },
+            LockPackage {
+                name: "dep2".to_string(),
+                version: "3.0.0".to_string(),
+                source: None,
+                dependencies: vec![],
+            },
+        ];
+
+        let err = lock_reachable_packages(&pkgs, "nope", "0.1.0")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未找到 root package"));
+
+        let mut reachable = lock_reachable_packages(&pkgs, "root", "0.1.0").unwrap();
+        reachable.sort();
+        assert_eq!(reachable, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_lock_dependency_与_semver判断() {
+        assert_eq!(
+            parse_lock_dependency("dep 1.2.3 (registry+xxx)"),
+            ("dep".to_string(), Some("1.2.3".to_string()))
+        );
+        assert_eq!(
+            parse_lock_dependency("dep git+https://example"),
+            ("dep".to_string(), None)
+        );
+        assert!(!looks_like_semver(""));
+        assert!(looks_like_semver("1.0.0"));
+    }
+
+    #[test]
+    fn lock_pkg_depends_on_按首段匹配() {
+        let pkg = LockPackage {
+            name: "a".to_string(),
+            version: "0.1.0".to_string(),
+            source: None,
+            dependencies: vec!["dep1 1.0.0 (registry+xxx)".to_string(), "dep2".to_string()],
+        };
+        assert!(lock_pkg_depends_on(&pkg, "dep1"));
+        assert!(lock_pkg_depends_on(&pkg, "dep2"));
+        assert!(!lock_pkg_depends_on(&pkg, "dep3"));
+    }
+
+    #[test]
+    fn find_registry_src_dir_与_manifest_quick_mentions_dris() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+        let _g = with_env_var("CARGO_HOME", tmp.path().to_str().unwrap());
+
+        // src_root 不存在时直接返回 None。
+        let none = find_registry_src_dir("pkg", "1.0.0").unwrap();
+        assert!(none.is_none());
+
+        let src_root = tmp.path().join("registry").join("src").join("reg1");
+        std::fs::create_dir_all(src_root.join("pkg-1.0.0")).unwrap();
+
+        let found = find_registry_src_dir("pkg", "1.0.0").unwrap().unwrap();
+        assert!(found.ends_with("pkg-1.0.0"));
+
+        let missing = find_registry_src_dir("nope", "1.0.0").unwrap();
+        assert!(missing.is_none());
+
+        let manifest = tmp.path().join("Cargo.toml");
+        std::fs::write(&manifest, "name = \"dris\"").unwrap();
+        assert!(manifest_quick_mentions_dris(&manifest).unwrap());
+        let other = tmp.path().join("Other.toml");
+        std::fs::write(&other, "name = \"x\"").unwrap();
+        assert!(!manifest_quick_mentions_dris(&other).unwrap());
+        let missing_file = tmp.path().join("Missing.toml");
+        assert!(!manifest_quick_mentions_dris(&missing_file).unwrap());
+
+        // 覆盖 Guard::drop 的 remove_var 分支（原本不存在该变量）。
+        let _g2 = with_env_var("DRIS_BUILD_TEST_TMP_ENV", "1");
+    }
+
+    #[test]
+    fn find_registry_src_dir_覆盖_home分支() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = TempDir::new().unwrap();
+
+        let old = std::env::var("CARGO_HOME").ok();
+        unsafe {
+            std::env::remove_var("CARGO_HOME");
+        }
+        let _home = with_env_var("HOME", tmp.path().to_str().unwrap());
+
+        let src_root = tmp
+            .path()
+            .join(".cargo")
+            .join("registry")
+            .join("src")
+            .join("reg1");
+        std::fs::create_dir_all(src_root.join("pkg-1.0.0")).unwrap();
+        let found = find_registry_src_dir("pkg", "1.0.0").unwrap().unwrap();
+        assert!(found.ends_with("pkg-1.0.0"));
+
+        // 覆盖 restore_env_var 的两个分支，并在最后恢复原始值。
+        restore_env_var(
+            "CARGO_HOME",
+            Some(tmp.path().join("dummy").to_string_lossy().to_string()),
+        );
+        restore_env_var("CARGO_HOME", None);
+        restore_env_var("CARGO_HOME", old);
+    }
+}

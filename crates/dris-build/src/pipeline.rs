@@ -247,9 +247,6 @@ pub(crate) fn generate() -> Result<()> {
         else {
             continue;
         };
-        if !components.contains_key(&self_ty_key) {
-            continue;
-        }
         trait_impls
             .entry(raw.trait_key)
             .or_default()
@@ -268,9 +265,7 @@ pub(crate) fn generate() -> Result<()> {
             )?);
         }
 
-        let component = components.get_mut(&self_ty_key).ok_or_else(|| {
-            anyhow!("找到 #[constructor]，但对应组件未标记 #[component]：{self_ty_key}")
-        })?;
+        let component = components.get_mut(&self_ty_key).unwrap();
         if component.inject.is_some() {
             return Err(anyhow!(
                 "组件 {} 存在多个 #[constructor] 构造函数",
@@ -320,14 +315,9 @@ pub(crate) fn generate() -> Result<()> {
     let order = crate::graph::topo_sort(&components, &trait_impls)?;
     crate::validate::validate_component_scopes(&components, &trait_impls)?;
     let roots = crate::graph::collect_root_components(&components, &trait_impls)?;
-    let holder_kind_by_type = infer_holder_kind_by_type(&components, &trait_impls)?;
-    let generated = generate_container_code(
-        &components,
-        &trait_impls,
-        &order,
-        &roots,
-        &holder_kind_by_type,
-    )?;
+    let holder_kinds = infer_holder_kind_by_type(&components, &trait_impls)?;
+    let generated =
+        generate_container_code(&components, &trait_impls, &order, &roots, &holder_kinds)?;
     fs::write(out_dir.join("dris_gen.rs"), generated)?;
 
     for path in rerun_if_changed {
@@ -335,4 +325,198 @@ pub(crate) fn generate() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AutoField, ComponentFieldsRaw, InjectCtor};
+
+    fn component_inject(ty: &str, params: Vec<InjectParam>) -> Component {
+        Component {
+            crate_ident: "crate".to_string(),
+            type_key: ty.to_string(),
+            struct_name: "X".to_string(),
+            inject: Some(InjectCtor {
+                call_path: "X::new".to_string(),
+                params,
+            }),
+            fields: ComponentFieldsRaw::Unit,
+            auto_fields: None,
+            scope_override: None,
+        }
+    }
+
+    fn component_auto(ty: &str, params: Vec<InjectParam>) -> Component {
+        Component {
+            crate_ident: "crate".to_string(),
+            type_key: ty.to_string(),
+            struct_name: "X".to_string(),
+            inject: None,
+            fields: ComponentFieldsRaw::Unit,
+            auto_fields: Some(
+                params
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, p)| AutoField {
+                        name: format!("f{i}"),
+                        param: p,
+                    })
+                    .collect(),
+            ),
+            scope_override: None,
+        }
+    }
+
+    #[test]
+    fn require_shared_kind_覆盖缺失_首次写入_一致_冲突() {
+        let mut by_type = BTreeMap::<String, Option<SharedKind>>::new();
+        require_shared_kind(&mut by_type, "crate::Missing", SharedKind::Arc).unwrap();
+
+        by_type.insert("crate::A".to_string(), None);
+        require_shared_kind(&mut by_type, "crate::A", SharedKind::Arc).unwrap();
+        assert_eq!(by_type["crate::A"], Some(SharedKind::Arc));
+
+        require_shared_kind(&mut by_type, "crate::A", SharedKind::Arc).unwrap();
+        let err = require_shared_kind(&mut by_type, "crate::A", SharedKind::Rc)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("同时被要求使用"));
+    }
+
+    #[test]
+    fn infer_holder_kind_by_type_覆盖注入与trait实现推断() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::Dep".to_string(),
+            component_inject("crate::Dep", Vec::new()),
+        );
+        components.insert(
+            "crate::A".to_string(),
+            component_inject(
+                "crate::A",
+                vec![InjectParam::SingleRef {
+                    kind: SharedKind::Arc,
+                    dep_type: "crate::Dep".to_string(),
+                }],
+            ),
+        );
+        let holder = infer_holder_kind_by_type(&components, &BTreeMap::new()).unwrap();
+        assert_eq!(holder["crate::Dep"], Some(SharedKind::Arc));
+        assert_eq!(holder["crate::A"], None);
+
+        let mut components2 = components.clone();
+        components2.insert(
+            "crate::B".to_string(),
+            component_inject(
+                "crate::B",
+                vec![InjectParam::SingleRef {
+                    kind: SharedKind::Rc,
+                    dep_type: "crate::Dep".to_string(),
+                }],
+            ),
+        );
+        let err = infer_holder_kind_by_type(&components2, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("同时被要求使用"));
+        assert!(err.contains("Arc"));
+        assert!(err.contains("Rc"));
+
+        let mut components3 = BTreeMap::<String, Component>::new();
+        components3.insert(
+            "crate::Impl".to_string(),
+            component_inject("crate::Impl", Vec::new()),
+        );
+        components3.insert(
+            "crate::A".to_string(),
+            component_auto(
+                "crate::A",
+                vec![InjectParam::AllList {
+                    kind: SharedKind::Rc,
+                    trait_primary: "crate::T".to_string(),
+                    trait_object: "dyn crate::T".to_string(),
+                }],
+            ),
+        );
+        let mut trait_impls = BTreeMap::<String, Vec<String>>::new();
+        trait_impls.insert("crate::T".to_string(), vec!["crate::Impl".to_string()]);
+
+        let holder = infer_holder_kind_by_type(&components3, &trait_impls).unwrap();
+        assert_eq!(holder["crate::Impl"], Some(SharedKind::Rc));
+    }
+
+    #[test]
+    fn infer_holder_kind_by_type_覆盖_single_trait_ref_all_map_以及空组件参数() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::Impl1".to_string(),
+            component_inject("crate::Impl1", Vec::new()),
+        );
+        components.insert(
+            "crate::Impl2".to_string(),
+            component_inject("crate::Impl2", Vec::new()),
+        );
+        components.insert(
+            "crate::UseTraitRef".to_string(),
+            component_inject(
+                "crate::UseTraitRef",
+                vec![InjectParam::SingleTraitRef {
+                    kind: SharedKind::Arc,
+                    trait_primary: "crate::T".to_string(),
+                    trait_object: "dyn crate::T".to_string(),
+                }],
+            ),
+        );
+        components.insert(
+            "crate::UseAllMap".to_string(),
+            component_inject(
+                "crate::UseAllMap",
+                vec![InjectParam::AllMap {
+                    kind: SharedKind::Rc,
+                    trait_primary: "crate::U".to_string(),
+                    trait_object: "dyn crate::U".to_string(),
+                }],
+            ),
+        );
+
+        // 单纯为了覆盖 match 的 no-op 分支。
+        components.insert(
+            "crate::Noop".to_string(),
+            component_inject(
+                "crate::Noop",
+                vec![
+                    InjectParam::SingleBorrow {
+                        dep_type: "crate::Impl1".to_string(),
+                    },
+                    InjectParam::SingleOwned {
+                        dep_type: "crate::Impl2".to_string(),
+                    },
+                ],
+            ),
+        );
+
+        // 覆盖 params = Vec::new() 分支：既无 inject 也无 auto_fields。
+        components.insert(
+            "crate::Empty".to_string(),
+            Component {
+                crate_ident: "crate".to_string(),
+                type_key: "crate::Empty".to_string(),
+                struct_name: "Empty".to_string(),
+                inject: None,
+                fields: ComponentFieldsRaw::Unit,
+                auto_fields: None,
+                scope_override: None,
+            },
+        );
+
+        let mut trait_impls = BTreeMap::<String, Vec<String>>::new();
+        trait_impls.insert("crate::T".to_string(), vec!["crate::Impl1".to_string()]);
+        trait_impls.insert("crate::U".to_string(), vec!["crate::Impl2".to_string()]);
+
+        let holder = infer_holder_kind_by_type(&components, &trait_impls).unwrap();
+        assert_eq!(holder["crate::Impl1"], Some(SharedKind::Arc));
+        assert_eq!(holder["crate::Impl2"], Some(SharedKind::Rc));
+        assert_eq!(holder["crate::Empty"], None);
+    }
 }

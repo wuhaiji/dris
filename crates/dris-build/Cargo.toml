@@ -15,3 +15,6 @@ categories = ["development-tools::build-utils"]
 anyhow = "1"
 quote = "1"
 syn = { version = "2.0.114", features = ["full", "visit-mut"] }
+
+[dev-dependencies]
+tempfile = "3"

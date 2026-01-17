@@ -202,12 +202,18 @@ fn parse_inject_ctor(
         ));
     }
 
+    let mut params = Vec::new();
     for arg in &impl_fn.sig.inputs {
-        if matches!(arg, syn::FnArg::Receiver(_)) {
-            return Err(anyhow!(
-                "#[constructor] 构造函数不支持 self 参数：{}",
-                impl_fn.sig.ident
-            ));
+        match arg {
+            syn::FnArg::Typed(pat_type) => {
+                params.push(parse_inject_param(&pat_type.ty, ctx)?);
+            }
+            syn::FnArg::Receiver(_) => {
+                return Err(anyhow!(
+                    "#[constructor] 构造函数不支持 self 参数：{}",
+                    impl_fn.sig.ident
+                ));
+            }
         }
     }
 
@@ -223,14 +229,6 @@ fn parse_inject_ctor(
             "#[constructor] 返回类型必须是 Self（或当前组件类型）：{}",
             impl_fn.sig.ident
         ));
-    }
-
-    let mut params = Vec::new();
-    for arg in &impl_fn.sig.inputs {
-        let syn::FnArg::Typed(pat_type) = arg else {
-            continue;
-        };
-        params.push(parse_inject_param(&pat_type.ty, ctx)?);
     }
 
     Ok(InjectCtorRaw {
@@ -296,10 +294,13 @@ fn parse_scope_override(
     let mut out = None;
 
     for attr in attrs {
-        let last = attr.path().segments.last().map(|s| s.ident.to_string());
-        let Some(last) = last else {
-            continue;
-        };
+        let last = attr
+            .path()
+            .segments
+            .last()
+            .expect("Attribute path 不应为空")
+            .ident
+            .to_string();
         if last != attr_name {
             continue;
         }
@@ -401,4 +402,627 @@ fn module_path_from_file(src_root: &Path, file: &Path) -> Result<Vec<String>> {
         other => parts.push(other.to_string()),
     }
     Ok(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn ctx() -> ScanCtx {
+        ScanCtx {
+            crate_ident: "my_crate".to_string(),
+            module_path: vec!["m".to_string()],
+        }
+    }
+
+    #[test]
+    fn attrs_helpers_覆盖常见判断() {
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component])];
+        assert!(has_attr(&attrs, "component"));
+        assert!(!has_attr(&attrs, "constructor"));
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[cfg(feature = "x")])];
+        assert!(has_cfg_like_attr(&attrs));
+
+        let attrs: Vec<syn::Attribute> =
+            vec![syn::parse_quote!(#[cfg_attr(feature = "x", component)])];
+        assert!(has_cfg_like_attr(&attrs));
+        assert!(cfg_attr_mentions_marker(&attrs, "component"));
+        assert!(!cfg_attr_mentions_marker(&attrs, "constructor"));
+    }
+
+    #[test]
+    fn parse_scope_override_覆盖无参数_重复_不支持形式_合法参数_错误参数() {
+        assert_eq!(parse_scope_override(&[], "component").unwrap(), None);
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component])];
+        assert_eq!(parse_scope_override(&attrs, "component").unwrap(), None);
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component = "x"])];
+        let err = parse_scope_override(&attrs, "component")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持 name-value"));
+
+        let attrs: Vec<syn::Attribute> = vec![
+            syn::parse_quote!(#[component(singleton)]),
+            syn::parse_quote!(#[component]),
+        ];
+        let err = parse_scope_override(&attrs, "component")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不允许重复标记"));
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component(singleton)])];
+        assert_eq!(
+            parse_scope_override(&attrs, "component").unwrap(),
+            Some(ComponentScope::Singleton)
+        );
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component(prototype)])];
+        assert_eq!(
+            parse_scope_override(&attrs, "component").unwrap(),
+            Some(ComponentScope::Prototype)
+        );
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component(scope = "Singleton")])];
+        assert_eq!(
+            parse_scope_override(&attrs, "component").unwrap(),
+            Some(ComponentScope::Singleton)
+        );
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component(scope = "unknown")])];
+        let err = parse_scope_override(&attrs, "component")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未知的 scope"));
+
+        let attrs: Vec<syn::Attribute> =
+            vec![syn::parse_quote!(#[component(singleton, prototype)])];
+        let err = parse_scope_override(&attrs, "component")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("重复指定 scope"));
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[derive(Debug)])];
+        assert_eq!(parse_scope_override(&attrs, "component").unwrap(), None);
+
+        let attrs: Vec<syn::Attribute> =
+            vec![syn::parse_quote!(#[component(singleton, singleton)])];
+        let err = parse_scope_override(&attrs, "component")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("重复指定 scope"));
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(
+            #[component(scope = "singleton", scope = "prototype")]
+        )];
+        let err = parse_scope_override(&attrs, "component")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("重复指定 scope"));
+
+        let attrs: Vec<syn::Attribute> = vec![syn::parse_quote!(#[component(xxx)])];
+        let err = parse_scope_override(&attrs, "component")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未知的参数"));
+    }
+
+    #[test]
+    fn module_path_from_file_覆盖常见路径规则() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(src.join("foo")).unwrap();
+
+        assert_eq!(
+            module_path_from_file(&src, &src).unwrap(),
+            Vec::<String>::new()
+        );
+
+        let p = src.join("lib.rs");
+        assert_eq!(
+            module_path_from_file(&src, &p).unwrap(),
+            Vec::<String>::new()
+        );
+
+        let p = src.join("main.rs");
+        assert_eq!(
+            module_path_from_file(&src, &p).unwrap(),
+            Vec::<String>::new()
+        );
+
+        let p = src.join("foo.rs");
+        assert_eq!(
+            module_path_from_file(&src, &p).unwrap(),
+            vec!["foo".to_string()]
+        );
+
+        let p = src.join("foo").join("mod.rs");
+        assert_eq!(
+            module_path_from_file(&src, &p).unwrap(),
+            vec!["foo".to_string()]
+        );
+
+        let p = src.join("foo").join("bar.rs");
+        assert_eq!(
+            module_path_from_file(&src, &p).unwrap(),
+            vec!["foo".to_string(), "bar".to_string()]
+        );
+
+        let other = tmp.path().join("other.rs");
+        let err = module_path_from_file(&src, &other).unwrap_err().to_string();
+        assert!(err.contains("计算相对路径失败"));
+    }
+
+    #[test]
+    fn return_and_ctor_helpers_覆盖关键约束() {
+        let ctx = ctx();
+        let self_ty = type_ref_from_type(&syn::parse_str("Foo").unwrap(), &ctx, true).unwrap();
+
+        assert!(return_matches_self(&syn::parse_str("Self").unwrap(), &self_ty, &ctx).unwrap());
+        assert!(return_matches_self(&syn::parse_str("Foo").unwrap(), &self_ty, &ctx).unwrap());
+        assert!(
+            return_matches_self(&syn::parse_str("my_crate::m::Foo").unwrap(), &self_ty, &ctx)
+                .unwrap()
+        );
+        assert!(!return_matches_self(&syn::parse_str("&Foo").unwrap(), &self_ty, &ctx).unwrap());
+        assert!(!return_matches_self(&syn::parse_str("::Foo").unwrap(), &self_ty, &ctx).unwrap());
+        assert!(
+            !return_matches_self(
+                &syn::parse_str("<Foo as Bar>::Baz").unwrap(),
+                &self_ty,
+                &ctx
+            )
+            .unwrap()
+        );
+        assert!(!return_matches_self(&syn::parse_str("Bar").unwrap(), &self_ty, &ctx).unwrap());
+
+        let err = normalize_inject_return(&ReturnType::Default, &ctx)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("必须显式声明返回类型"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            fn new() -> Self { Self }
+        };
+        let err = parse_inject_ctor(&f, &self_ty, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("必须是 pub"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            pub fn new<T>() -> Self { Self }
+        };
+        let err = parse_inject_ctor(&f, &self_ty, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持泛型"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            pub fn new(&self) -> Self { Self }
+        };
+        let err = parse_inject_ctor(&f, &self_ty, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持 self 参数"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            pub fn new() { }
+        };
+        let err = parse_inject_ctor(&f, &self_ty, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("必须显式声明返回类型"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            pub fn new() -> std::sync::Arc<Self> { std::sync::Arc::new(Self) }
+        };
+        let err = parse_inject_ctor(&f, &self_ty, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持 #[constructor] 返回 Arc<Self>/Rc<Self>"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            pub fn new() -> u8 { 1 }
+        };
+        let err = parse_inject_ctor(&f, &self_ty, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("返回类型必须是 Self"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            pub fn new(_dep: Vec<u8>) -> Self { Self }
+        };
+        let err = parse_inject_ctor(&f, &self_ty, &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("而不是 Vec"));
+
+        let f: syn::ImplItemFn = syn::parse_quote! {
+            #[constructor]
+            pub fn new(_dep: std::sync::Arc<u8>) -> Self { Self }
+        };
+        let out = parse_inject_ctor(&f, &self_ty, &ctx).unwrap();
+        assert!(out.call_path.contains("Foo"));
+        assert!(out.call_path.contains("new"));
+        assert_eq!(out.params.len(), 1);
+    }
+
+    #[test]
+    fn collect_rs_files_覆盖非rs文件与symlink() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        std::fs::write(src.join("a.rs"), "pub struct A;").unwrap();
+        std::fs::write(src.join("note.txt"), "x").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(src.join("a.rs"), src.join("a_link")).unwrap();
+        }
+
+        let mut files = Vec::new();
+        collect_rs_files(&src, &mut files).unwrap();
+        assert!(files.iter().any(|p| p.ends_with("a.rs")));
+        assert!(!files.iter().any(|p| p.ends_with("note.txt")));
+        assert!(!files.iter().any(|p| p.ends_with("a_link")));
+    }
+
+    #[test]
+    fn scan_crate_覆盖无src与基本扫描() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname=\"t\"\nversion=\"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let (out, touched) = scan_crate(tmp.path(), "crate").unwrap();
+        assert!(out.components.is_empty());
+        assert!(touched.contains(&tmp.path().join("Cargo.toml")));
+
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(
+            src.join("lib.rs"),
+            r#"
+use dris_rt::{component, constructor};
+
+#[component(singleton)]
+pub struct A;
+impl A {
+    #[constructor]
+    pub fn new() -> Self { Self }
+}
+
+mod inner {
+    use dris_rt::{component, constructor};
+
+    #[component]
+    pub struct B;
+    impl B {
+        #[constructor]
+        pub fn new() -> Self { Self }
+    }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("sub/mod.rs"),
+            r#"
+use dris_rt::component;
+
+#[component]
+pub struct C {
+    pub ok: u8,
+    bad: u8,
+    pub xs: Vec<u8>,
+}
+"#,
+        )
+        .unwrap();
+
+        let (out, touched) = scan_crate(tmp.path(), "crate").unwrap();
+        assert_eq!(out.components.len(), 3);
+        assert!(touched.contains(&tmp.path().join("Cargo.toml")));
+        assert!(touched.contains(&src.join("lib.rs")));
+        assert!(touched.contains(&src.join("sub/mod.rs")));
+        assert!(
+            out.components
+                .iter()
+                .any(|c| c.type_key.contains("crate :: A"))
+        );
+        assert!(
+            out.components
+                .iter()
+                .any(|c| c.type_key.contains("crate :: inner :: B"))
+        );
+        assert!(
+            out.components
+                .iter()
+                .any(|c| c.type_key.contains("crate :: sub :: C"))
+        );
+    }
+
+    #[test]
+    fn scan_items_禁止cfg_attr条件启用component() {
+        let ast: syn::File = syn::parse_quote! {
+            #[cfg_attr(feature = "x", component)]
+            pub struct A;
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持用 #[cfg_attr] 条件启用 #[component]"));
+    }
+
+    #[test]
+    fn scan_items_覆盖cfg作用域组件与构造函数限制() {
+        // 组件声明在 cfg/cfg_attr 作用域里。
+        let ast: syn::File = syn::parse_quote! {
+            #[cfg(feature = "x")]
+            #[component]
+            pub struct A;
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持在 cfg/cfg_attr 作用域里声明组件"));
+
+        // 覆盖 cfg_guarded=true 的分支。
+        let ast: syn::File = syn::parse_quote! {
+            #[component]
+            pub struct A;
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持在 cfg/cfg_attr 作用域里声明组件"));
+
+        // impl 级别 cfg：允许存在（只要不放 constructor）。
+        let ast: syn::File = syn::parse_quote! {
+            #[cfg(feature = "x")]
+            impl A {}
+        };
+        let mut out = ScanOut::default();
+        scan_items(&ast.items, &ctx(), &mut out, false).unwrap();
+
+        // 覆盖 cfg_guarded=true 时的 impl_cfg_guarded 分支。
+        let ast: syn::File = syn::parse_quote! {
+            impl A {}
+        };
+        let mut out = ScanOut::default();
+        scan_items(&ast.items, &ctx(), &mut out, true).unwrap();
+
+        // impl 级别 cfg_attr 条件启用 constructor。
+        let ast: syn::File = syn::parse_quote! {
+            #[cfg_attr(feature = "x", constructor)]
+            impl A {}
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持用 #[cfg_attr] 条件启用 #[constructor]"));
+
+        // fn 级别 cfg_attr 条件启用 constructor。
+        let ast: syn::File = syn::parse_quote! {
+            impl A {
+                #[cfg_attr(feature = "x", constructor)]
+                pub fn new() -> Self { Self }
+            }
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持用 #[cfg_attr] 条件启用 #[constructor]"));
+
+        // 在 cfg 作用域里声明构造函数。
+        let ast: syn::File = syn::parse_quote! {
+            impl A {
+                #[constructor]
+                #[cfg(feature = "x")]
+                pub fn new() -> Self { Self }
+            }
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持在 cfg/cfg_attr 作用域里声明构造函数"));
+
+        // 覆盖：impl_cfg_guarded=true 但 cfg_attr_mentions_marker=false 的分支。
+        let ast: syn::File = syn::parse_quote! {
+            #[cfg(feature = "x")]
+            impl A {}
+        };
+        let mut out = ScanOut::default();
+        scan_items(&ast.items, &ctx(), &mut out, false).unwrap();
+
+        // 覆盖：由 impl_cfg_guarded=true 触发的构造函数限制。
+        let ast: syn::File = syn::parse_quote! {
+            #[cfg(feature = "x")]
+            impl A {
+                #[constructor]
+                pub fn new() -> Self { Self }
+            }
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持在 cfg/cfg_attr 作用域里声明构造函数"));
+    }
+
+    #[test]
+    fn scan_items_覆盖trait_impl_移除函数provider_非inline_mod跳过() {
+        let ast: syn::File = syn::parse_quote! {
+            mod external;
+
+            #[bean]
+            fn provider() {}
+
+            pub trait T {}
+            #[component]
+            pub struct A;
+            impl T for A {}
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("已移除函数 provider"));
+
+        let ast: syn::File = syn::parse_quote! {
+            #[component]
+            fn provider() {}
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("已移除函数 provider"));
+
+        let ast: syn::File = syn::parse_quote! {
+            mod external;
+
+            pub trait T {}
+            #[component]
+            pub struct A;
+            impl T for A {}
+        };
+        let mut out = ScanOut::default();
+        scan_items(&ast.items, &ctx(), &mut out, false).unwrap();
+        assert_eq!(out.trait_impls.len(), 1);
+    }
+
+    #[test]
+    fn scan_items_会跳过未标记component的结构体() {
+        let ast: syn::File = syn::parse_quote! {
+            pub struct NotComponent;
+
+            #[component]
+            pub struct A;
+        };
+        let mut out = ScanOut::default();
+        scan_items(&ast.items, &ctx(), &mut out, false).unwrap();
+        assert_eq!(out.components.len(), 1);
+        assert_eq!(out.components[0].struct_name, "A");
+    }
+
+    #[test]
+    fn scan_items_覆盖更多结构体与impl分支() {
+        // type_key_from_qualified_ident 解析失败（模块路径含非法 ident）。
+        let bad_ctx = ScanCtx {
+            crate_ident: "crate".to_string(),
+            module_path: vec!["bad-name".to_string()],
+        };
+        let ast: syn::File = syn::parse_quote! {
+            #[component]
+            pub struct A;
+        };
+        let mut out = ScanOut::default();
+        assert!(scan_items(&ast.items, &bad_ctx, &mut out, false).is_err());
+
+        // tuple struct + named 字段里混入一个 ident=None 的字段（覆盖 continue 分支）。
+        let ast: syn::File = syn::parse_quote! {
+            #[component]
+            pub struct Tup(u8);
+
+            #[component]
+            pub struct Named {
+                pub a: u8,
+            }
+        };
+        let mut out = ScanOut::default();
+        scan_items(&ast.items, &ctx(), &mut out, false).unwrap();
+        assert!(
+            out.components
+                .iter()
+                .any(|c| matches!(c.fields, ComponentFieldsRaw::Tuple))
+        );
+
+        // 人工插入一个无名字段到 named fields，同时覆盖 if let 的匹配与不匹配分支。
+        let cases: Vec<(syn::File, bool)> = vec![
+            (syn::parse_quote! { fn nope() {} }, false),
+            (
+                syn::parse_quote! {
+                    #[component]
+                    pub struct Weird(u8);
+                },
+                false,
+            ),
+            (
+                syn::parse_quote! {
+                    #[component]
+                    pub struct Weird {
+                        pub a: u8,
+                    }
+                },
+                true,
+            ),
+        ];
+        for (mut ast, expect_inserted) in cases {
+            let mut inserted = false;
+            if let Item::Struct(s) = &mut ast.items[0] {
+                if let syn::Fields::Named(named) = &mut s.fields {
+                    named.named.push(syn::parse_quote!(pub u8));
+                    inserted = true;
+                }
+            }
+            assert_eq!(inserted, expect_inserted);
+
+            if inserted {
+                let mut out = ScanOut::default();
+                scan_items(&ast.items, &ctx(), &mut out, false).unwrap();
+            }
+        }
+
+        // impl item 非 fn、以及普通方法（非 constructor）会被跳过。
+        let ast: syn::File = syn::parse_quote! {
+            impl A {
+                type X = u8;
+                pub fn helper() {}
+
+                #[constructor]
+                pub fn new() -> Self { Self }
+            }
+
+            fn normal() {}
+        };
+        let mut out = ScanOut::default();
+        scan_items(&ast.items, &ctx(), &mut out, false).unwrap();
+        assert_eq!(out.injects.len(), 1);
+
+        // 覆盖：cfg_guarded=true 传播到 inline mod。
+        let ast: syn::File = syn::parse_quote! {
+            mod inner {
+                #[component]
+                pub struct A;
+            }
+        };
+        let mut out = ScanOut::default();
+        let err = scan_items(&ast.items, &ctx(), &mut out, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不支持在 cfg/cfg_attr 作用域里声明组件"));
+    }
 }

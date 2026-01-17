@@ -139,3 +139,300 @@ pub(crate) fn validate_component_scopes(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{AutoField, ComponentFieldsRaw, InjectCtor};
+
+    fn component_with_inject(
+        ty: &str,
+        scope_override: Option<ComponentScope>,
+        params: Vec<InjectParam>,
+    ) -> Component {
+        Component {
+            crate_ident: "crate".to_string(),
+            type_key: ty.to_string(),
+            struct_name: "X".to_string(),
+            inject: Some(InjectCtor {
+                call_path: "X::new".to_string(),
+                params,
+            }),
+            fields: ComponentFieldsRaw::Unit,
+            auto_fields: None,
+            scope_override,
+        }
+    }
+
+    fn component_with_auto_fields(
+        ty: &str,
+        scope_override: Option<ComponentScope>,
+        params: Vec<InjectParam>,
+    ) -> Component {
+        Component {
+            crate_ident: "crate".to_string(),
+            type_key: ty.to_string(),
+            struct_name: "X".to_string(),
+            inject: None,
+            fields: ComponentFieldsRaw::Unit,
+            auto_fields: Some(
+                params
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, p)| AutoField {
+                        name: format!("f{i}"),
+                        param: p,
+                    })
+                    .collect(),
+            ),
+            scope_override,
+        }
+    }
+
+    #[test]
+    fn validate_component_scopes_组件缺少构造信息会报错() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::A".to_string(),
+            Component {
+                crate_ident: "crate".to_string(),
+                type_key: "crate::A".to_string(),
+                struct_name: "A".to_string(),
+                inject: None,
+                fields: ComponentFieldsRaw::Unit,
+                auto_fields: None,
+                scope_override: None,
+            },
+        );
+        let err = validate_component_scopes(&components, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("组件缺少 #[constructor] 且无法自动构造"));
+    }
+
+    #[test]
+    fn validate_component_scopes_single_ref_覆盖缺失与非单例() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleRef {
+                    kind: SharedKind::Arc,
+                    dep_type: "crate::Missing".to_string(),
+                }],
+            ),
+        );
+        let err = validate_component_scopes(&components, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未找到对应组件"));
+
+        components.insert(
+            "crate::B".to_string(),
+            component_with_inject("crate::B", None, Vec::new()),
+        );
+        let mut components2 = components.clone();
+        components2.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleRef {
+                    kind: SharedKind::Arc,
+                    dep_type: "crate::B".to_string(),
+                }],
+            ),
+        );
+        let err = validate_component_scopes(&components2, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不是单例"));
+
+        let mut components3 = BTreeMap::<String, Component>::new();
+        components3.insert(
+            "crate::B".to_string(),
+            component_with_inject("crate::B", Some(ComponentScope::Singleton), Vec::new()),
+        );
+        components3.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleRef {
+                    kind: SharedKind::Arc,
+                    dep_type: "crate::B".to_string(),
+                }],
+            ),
+        );
+        validate_component_scopes(&components3, &BTreeMap::new()).unwrap();
+    }
+
+    #[test]
+    fn validate_component_scopes_single_trait_ref_覆盖无实现_多实现_缺失组件_非单例() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleTraitRef {
+                    kind: SharedKind::Arc,
+                    trait_primary: "crate::MyTrait".to_string(),
+                    trait_object: "dyn crate::MyTrait".to_string(),
+                }],
+            ),
+        );
+
+        let err = validate_component_scopes(&components, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未找到任何实现"));
+
+        let mut trait_impls = BTreeMap::<String, Vec<String>>::new();
+        trait_impls.insert(
+            "crate::MyTrait".to_string(),
+            vec!["crate::Impl1".to_string(), "crate::Impl2".to_string()],
+        );
+        let err = validate_component_scopes(&components, &trait_impls)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("找到多个实现"));
+
+        let mut trait_impls = BTreeMap::<String, Vec<String>>::new();
+        trait_impls.insert(
+            "crate::MyTrait".to_string(),
+            vec!["crate::Impl1".to_string()],
+        );
+        let err = validate_component_scopes(&components, &trait_impls)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未找到对应组件"));
+
+        let mut components2 = components.clone();
+        components2.insert(
+            "crate::Impl1".to_string(),
+            component_with_inject("crate::Impl1", None, Vec::new()),
+        );
+        let err = validate_component_scopes(&components2, &trait_impls)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不是单例"));
+
+        let mut components3 = components.clone();
+        components3.insert(
+            "crate::Impl1".to_string(),
+            component_with_inject("crate::Impl1", Some(ComponentScope::Singleton), Vec::new()),
+        );
+        validate_component_scopes(&components3, &trait_impls).unwrap();
+    }
+
+    #[test]
+    fn validate_component_scopes_single_owned_覆盖缺失与禁止注入单例() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleOwned {
+                    dep_type: "crate::Missing".to_string(),
+                }],
+            ),
+        );
+        let err = validate_component_scopes(&components, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("未找到对应组件"));
+
+        components.insert(
+            "crate::B".to_string(),
+            component_with_inject("crate::B", Some(ComponentScope::Singleton), Vec::new()),
+        );
+        let mut components2 = components.clone();
+        components2.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleOwned {
+                    dep_type: "crate::B".to_string(),
+                }],
+            ),
+        );
+        let err = validate_component_scopes(&components2, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("是单例"));
+
+        let mut components3 = BTreeMap::<String, Component>::new();
+        components3.insert(
+            "crate::B".to_string(),
+            component_with_inject("crate::B", None, Vec::new()),
+        );
+        components3.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleOwned {
+                    dep_type: "crate::B".to_string(),
+                }],
+            ),
+        );
+        validate_component_scopes(&components3, &BTreeMap::new()).unwrap();
+    }
+
+    #[test]
+    fn validate_component_scopes_all_list_all_map_覆盖忽略缺失实现与非单例实现() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::A".to_string(),
+            component_with_auto_fields(
+                "crate::A",
+                None,
+                vec![
+                    InjectParam::AllList {
+                        kind: SharedKind::Rc,
+                        trait_primary: "crate::MyTrait".to_string(),
+                        trait_object: "dyn crate::MyTrait".to_string(),
+                    },
+                    InjectParam::AllMap {
+                        kind: SharedKind::Rc,
+                        trait_primary: "crate::MyTrait".to_string(),
+                        trait_object: "dyn crate::MyTrait".to_string(),
+                    },
+                    InjectParam::SingleBorrow {
+                        dep_type: "crate::B".to_string(),
+                    },
+                ],
+            ),
+        );
+        components.insert(
+            "crate::B".to_string(),
+            component_with_inject("crate::B", None, Vec::new()),
+        );
+
+        let mut trait_impls = BTreeMap::<String, Vec<String>>::new();
+        trait_impls.insert(
+            "crate::MyTrait".to_string(),
+            vec!["crate::MissingImpl".to_string(), "crate::Impl1".to_string()],
+        );
+        components.insert(
+            "crate::Impl1".to_string(),
+            component_with_inject("crate::Impl1", None, Vec::new()),
+        );
+
+        let err = validate_component_scopes(&components, &trait_impls)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("不是单例"));
+
+        components.insert(
+            "crate::Impl1".to_string(),
+            component_with_inject("crate::Impl1", Some(ComponentScope::Singleton), Vec::new()),
+        );
+        validate_component_scopes(&components, &trait_impls).unwrap();
+    }
+}
