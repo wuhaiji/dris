@@ -39,10 +39,12 @@ pub(crate) fn validate_component_scopes(
                     })?;
                     if dep_scope != ComponentScope::Singleton {
                         return Err(anyhow!(
-                            "组件 {} 以 {} 注入 {}，但 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
+                            "组件 {} 以 {} 注入 {}，但 {} 不是单例：{}<T> 仅支持 Singleton 注入；若该依赖应为 Prototype，请改为按值注入 {}；否则请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
                             ty,
                             shared_kind_name(*kind),
                             dep_type,
+                            dep_type,
+                            shared_kind_name(*kind),
                             dep_type,
                             dep_type,
                         ));
@@ -79,12 +81,13 @@ pub(crate) fn validate_component_scopes(
                         .ok_or_else(|| anyhow!("组件 {} 依赖 {}，但未找到对应组件", ty, impl_ty))?;
                     if dep_scope != ComponentScope::Singleton {
                         return Err(anyhow!(
-                            "组件 {} 以 {}<dyn Trait> 注入 {} 的实现 {}，但 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
+                            "组件 {} 以 {}<dyn Trait> 注入 {} 的实现 {}，但 {} 不是单例：{}<dyn Trait> 仅支持 Singleton 实现；若该实现应为 Prototype，请改为按值注入具体类型；否则请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
                             ty,
                             shared_kind_name(*kind),
                             trait_primary,
                             impl_ty,
                             impl_ty,
+                            shared_kind_name(*kind),
                             impl_ty,
                         ));
                     }
@@ -105,7 +108,20 @@ pub(crate) fn validate_component_scopes(
                         ));
                     }
                 }
-                InjectParam::SingleBorrow { .. } => {}
+                InjectParam::SingleBorrow { dep_type } => {
+                    let dep_scope = scope_by_type.get(dep_type).copied().ok_or_else(|| {
+                        anyhow!("组件 {} 依赖 {}，但未找到对应组件", ty, dep_type)
+                    })?;
+                    if dep_scope != ComponentScope::Singleton {
+                        return Err(anyhow!(
+                            "组件 {} 以 &T 注入 {}，但 {} 是 Prototype：Prototype 组件不支持 &T/Rc<T>/Arc<T> 注入，请改为按值注入 {}",
+                            ty,
+                            dep_type,
+                            dep_type,
+                            dep_type
+                        ));
+                    }
+                }
                 InjectParam::AllList {
                     kind,
                     trait_primary,
@@ -123,11 +139,12 @@ pub(crate) fn validate_component_scopes(
                         };
                         if dep_scope != ComponentScope::Singleton {
                             return Err(anyhow!(
-                                "组件 {} 需要 {} 的实现以 {}<dyn Trait> 注入，但实现 {} 不是单例：请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
+                                "组件 {} 需要 {} 的实现以 {}<dyn Trait> 注入，但实现 {} 不是单例：{}<dyn Trait> 仅支持 Singleton 实现；若该实现应为 Prototype，请改为按值注入具体类型；否则请把 {} 声明为 Singleton（例如 #[component(singleton)]）",
                                 ty,
                                 trait_primary,
                                 shared_kind_name(*kind),
                                 impl_ty,
+                                shared_kind_name(*kind),
                                 impl_ty,
                             ));
                         }
@@ -385,6 +402,36 @@ mod tests {
     }
 
     #[test]
+    fn validate_component_scopes_single_borrow_禁止借用prototype_允许借用单例() {
+        let mut components = BTreeMap::<String, Component>::new();
+        components.insert(
+            "crate::B".to_string(),
+            component_with_inject("crate::B", None, Vec::new()),
+        );
+        components.insert(
+            "crate::A".to_string(),
+            component_with_inject(
+                "crate::A",
+                None,
+                vec![InjectParam::SingleBorrow {
+                    dep_type: "crate::B".to_string(),
+                }],
+            ),
+        );
+        let err = validate_component_scopes(&components, &BTreeMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Prototype"));
+        assert!(err.contains("不支持"));
+
+        components.insert(
+            "crate::B".to_string(),
+            component_with_inject("crate::B", Some(ComponentScope::Singleton), Vec::new()),
+        );
+        validate_component_scopes(&components, &BTreeMap::new()).unwrap();
+    }
+
+    #[test]
     fn validate_component_scopes_all_list_all_map_覆盖忽略缺失实现与非单例实现() {
         let mut components = BTreeMap::<String, Component>::new();
         components.insert(
@@ -411,7 +458,7 @@ mod tests {
         );
         components.insert(
             "crate::B".to_string(),
-            component_with_inject("crate::B", None, Vec::new()),
+            component_with_inject("crate::B", Some(ComponentScope::Singleton), Vec::new()),
         );
 
         let mut trait_impls = BTreeMap::<String, Vec<String>>::new();
