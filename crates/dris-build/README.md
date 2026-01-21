@@ -8,10 +8,10 @@
 
 ```toml
 [dependencies]
-dris-rt = "0.1.0"
+dris-rt = "0.1.1"
 
 [build-dependencies]
-dris-build = "0.1.0"
+dris-build = "0.1.1"
 ```
 
 `build.rs`：

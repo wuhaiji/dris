@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "dris-build"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "prettyplease",
@@ -144,11 +144,11 @@ dependencies = [
 
 [[package]]
 name = "dris-macros"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "dris-rt"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dris-macros",
 ]
