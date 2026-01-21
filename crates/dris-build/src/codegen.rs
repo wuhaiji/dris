@@ -51,8 +51,7 @@ enum AccessMode {
 }
 
 fn parse_ident(ident: &str) -> Result<syn::Ident> {
-    syn::parse_str::<syn::Ident>(ident)
-        .with_context(|| format!("生成的标识符无法解析：{ident}"))
+    syn::parse_str::<syn::Ident>(ident).with_context(|| format!("生成的标识符无法解析：{ident}"))
 }
 
 fn parse_type(ty: &str) -> Result<syn::Type> {
