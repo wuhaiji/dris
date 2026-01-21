@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use quote::{ToTokens, quote};
 
 use crate::{
     model::{Component, ComponentScope, InjectParam, SharedKind},
@@ -43,90 +44,47 @@ fn holder_new(holder: Option<SharedKind>, expr: &str) -> String {
     }
 }
 
-struct RustWriter {
-    buf: String,
-    indent: usize,
-}
-
-impl RustWriter {
-    fn new() -> Self {
-        Self {
-            buf: String::new(),
-            indent: 0,
-        }
-    }
-
-    fn finish(self) -> String {
-        self.buf
-    }
-
-    fn blank_line(&mut self) {
-        self.buf.push('\n');
-    }
-
-    fn line(&mut self, s: impl AsRef<str>) {
-        for _ in 0..self.indent {
-            self.buf.push_str("    ");
-        }
-        self.buf.push_str(s.as_ref());
-        self.buf.push('\n');
-    }
-
-    fn lines(&mut self, s: &str) {
-        for line in s.lines() {
-            self.line(line);
-        }
-    }
-
-    fn block<F>(&mut self, header: impl AsRef<str>, f: F)
-    where
-        F: FnOnce(&mut Self),
-    {
-        self.line(format!("{} {{", header.as_ref()));
-        self.indent += 1;
-        f(self);
-        self.indent -= 1;
-        self.line("}");
-    }
-
-    fn write_let_assign(&mut self, lhs: &str, expr: &str) {
-        let mut it = expr.lines();
-        let Some(first) = it.next() else {
-            self.line(format!("{lhs} = ();"));
-            return;
-        };
-        let rest: Vec<&str> = it.collect();
-        if rest.is_empty() {
-            self.line(format!("{lhs} = {first};"));
-            return;
-        }
-
-        self.line(format!("{lhs} = {first}"));
-        for mid in &rest[..rest.len() - 1] {
-            self.line(*mid);
-        }
-        self.line(format!("{};", rest[rest.len() - 1]));
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 enum AccessMode {
     Init,
     Runtime,
 }
 
+fn parse_ident(ident: &str) -> Result<syn::Ident> {
+    syn::parse_str::<syn::Ident>(ident)
+        .with_context(|| format!("生成的标识符无法解析：{ident}"))
+}
+
+fn parse_type(ty: &str) -> Result<syn::Type> {
+    syn::parse_str::<syn::Type>(ty).with_context(|| format!("无法解析类型：{ty}"))
+}
+
+fn parse_expr(expr: &str) -> Result<syn::Expr> {
+    if expr.trim().is_empty() {
+        return syn::parse_str::<syn::Expr>("()").context("无法解析空表达式为 ()");
+    }
+    syn::parse_str::<syn::Expr>(expr).with_context(|| format!("无法解析表达式：{expr}"))
+}
+
+fn format_generated(tokens: impl ToTokens) -> Result<String> {
+    let file: syn::File = syn::parse2(tokens.to_token_stream()).context("生成的代码无法解析")?;
+    Ok(prettyplease::unparse(&file))
+}
+
 pub(crate) fn minimal_generated_code() -> String {
-    let mut w = RustWriter::new();
-    w.line("#[allow(dead_code)]");
-    w.block("pub mod dris_gen", |w| {
-        w.line("pub struct Container;");
-        w.block("impl Container", |w| {
-            w.block("pub fn build() -> Self", |w| {
-                w.line("Self");
-            });
-        });
-    });
-    w.finish()
+    let tokens = quote! {
+        #[allow(dead_code)]
+        pub mod dris_gen {
+            pub struct Container;
+
+            impl Container {
+                pub fn build() -> Self {
+                    Self
+                }
+            }
+        }
+    };
+    format_generated(tokens).expect("最小生成代码应当可格式化")
 }
 
 pub(crate) fn generate_container_code(
@@ -249,71 +207,92 @@ pub(crate) fn generate_container_code(
         });
     }
 
-    let mut w = RustWriter::new();
-    w.line("#[allow(dead_code)]");
-    w.block("pub mod dris_gen", |w| {
-        w.block("pub struct Container", |w| {
-            for f in &singleton_fields {
-                w.line(format!("{}: {},", f.name, holder_type(f.holder, &f.ty)));
-            }
-        });
-        w.blank_line();
+    let singleton_struct_fields = singleton_fields
+        .iter()
+        .map(|f| -> Result<_> {
+            let name = parse_ident(&f.name)?;
+            let ty = parse_type(&holder_type(f.holder, &f.ty))?;
+            Ok(quote! { #name: #ty, })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-        w.block("impl Container", |w| {
-            w.block("pub fn build() -> Self", |w| {
-                for f in &singleton_fields {
-                    w.write_let_assign(
-                        &format!("let {}: {}", f.name, holder_type(f.holder, &f.ty)),
-                        &f.init_expr,
-                    );
-                }
-                w.block("Self", |w| {
-                    for f in &singleton_fields {
-                        w.line(format!("{},", f.name));
-                    }
-                });
-            });
-            w.blank_line();
+    let singleton_let_stmts = singleton_fields
+        .iter()
+        .map(|f| -> Result<_> {
+            let name = parse_ident(&f.name)?;
+            let ty = parse_type(&holder_type(f.holder, &f.ty))?;
+            let expr = parse_expr(&f.init_expr)
+                .with_context(|| format!("解析单例组件 {} 的初始化表达式失败", f.ty))?;
+            Ok(quote! { let #name: #ty = #expr; })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-            for m in &root_methods {
-                match m.scope {
-                    ComponentScope::Singleton => match m.holder {
-                        Some(kind) => {
-                            w.block(
-                                format!(
-                                    "pub fn {}(&self) -> {}",
-                                    m.method_name,
-                                    shared_type(kind, &m.ty)
-                                ),
-                                |w| {
-                                    w.line(format!("self.{}.clone()", m.method_name));
-                                },
-                            );
+    let singleton_self_inits = singleton_fields
+        .iter()
+        .map(|f| -> Result<_> {
+            let name = parse_ident(&f.name)?;
+            Ok(quote! { #name, })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let root_methods_tokens = root_methods
+        .iter()
+        .map(|m| -> Result<_> {
+            let method_name = parse_ident(&m.method_name)?;
+            match m.scope {
+                ComponentScope::Singleton => match m.holder {
+                    Some(kind) => {
+                        let ret_ty = parse_type(&shared_type(kind, &m.ty))?;
+                        Ok(quote! {
+                            pub fn #method_name(&self) -> #ret_ty {
+                                self.#method_name.clone()
+                            }
+                        })
+                    }
+                    None => {
+                        let ret_ty = parse_type(&format!("&{}", m.ty))?;
+                        Ok(quote! {
+                            pub fn #method_name(&self) -> #ret_ty {
+                                &self.#method_name
+                            }
+                        })
+                    }
+                },
+                ComponentScope::Prototype => {
+                    let ret_ty = parse_type(&m.ty)?;
+                    let expr = parse_expr(m.expr.as_deref().unwrap_or_default())
+                        .with_context(|| format!("解析原型组件 {} 的构造表达式失败", m.ty))?;
+                    Ok(quote! {
+                        pub fn #method_name(&self) -> #ret_ty {
+                            #expr
                         }
-                        None => {
-                            w.block(
-                                format!("pub fn {}(&self) -> &{}", m.method_name, m.ty),
-                                |w| {
-                                    w.line(format!("&self.{}", m.method_name));
-                                },
-                            );
-                        }
-                    },
-                    ComponentScope::Prototype => {
-                        let expr = m.expr.as_deref().unwrap_or_default();
-                        w.block(
-                            format!("pub fn {}(&self) -> {}", m.method_name, m.ty),
-                            |w| {
-                                w.lines(expr);
-                            },
-                        );
+                    })
+                }
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let tokens = quote! {
+        #[allow(dead_code)]
+        pub mod dris_gen {
+            pub struct Container {
+                #(#singleton_struct_fields)*
+            }
+
+            impl Container {
+                pub fn build() -> Self {
+                    #(#singleton_let_stmts)*
+                    Self {
+                        #(#singleton_self_inits)*
                     }
                 }
-                w.blank_line();
+
+                #(#root_methods_tokens)*
             }
-        });
-    });
-    Ok(w.finish())
+        }
+    };
+
+    format_generated(tokens)
 }
 
 fn build_component_expr(
@@ -779,19 +758,6 @@ mod tests {
             auto_fields: Some(fields),
             scope_override,
         }
-    }
-
-    #[test]
-    fn rust_writer_write_let_assign_覆盖空_单行_多行() {
-        let mut w = RustWriter::new();
-        w.write_let_assign("let a", "");
-        w.write_let_assign("let b", "1");
-        w.write_let_assign("let c", "a\nb\nc");
-        let out = w.finish();
-        assert!(out.contains("let a = ();"));
-        assert!(out.contains("let b = 1;"));
-        assert!(out.contains("let c = a"));
-        assert!(out.contains("c;"));
     }
 
     #[test]
